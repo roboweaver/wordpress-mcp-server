@@ -50,20 +50,20 @@
   - Confirmed `npm audit` reports zero vulnerabilities and `npm run build` succeeds (exit 0).
   - _Requirements: 4.1, 4.2, 4.3_
 
-- [ ] 8. Add focused tests for security-critical units
+- [x] 8. Add focused tests for security-critical units
   - Set up a test runner (vitest or node:test).
   - Test `validateTarget` (scheme, private-range, allowlist cases) and `loadConfig`
     (missing keys, boolean/list parsing) and destructive gating.
   - _Requirements: 2.1, 2.2, 3.2, 3.4, 1.3, 6.1_
 
-- [ ] 9. Align README with the implementation
+- [x] 9. Align README with the implementation
   - Rewrite the tool list to match the actual kebab-case tools; remove non-existent tools
     (`custom_request`, `get_user_by_login`, etc.).
   - Document environment-variable configuration and the security toggles, replacing
     per-call credential examples.
   - _Requirements: 5.1, 5.2, 5.3_
 
-- [ ] 10. Final verification pass
+- [x] 10. Final verification pass
   - Run `npm run build`, `npm audit`, and the new tests.
   - Confirm the server fails fast without required env vars and starts with them.
   - _Requirements: 1.3, 4.1, 4.3_
