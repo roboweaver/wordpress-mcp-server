@@ -69,6 +69,15 @@ describe("loadConfig - required keys", () => {
     expect(cfg.allowDestructive).toBe(false);
     expect(cfg.allowedHosts).toBeUndefined();
   });
+
+  it("strips trailing slashes from WP_SITE_URL", () => {
+    expect(loadConfig({ ...validEnv, WP_SITE_URL: "https://example.com/" }).siteUrl).toBe(
+      "https://example.com"
+    );
+    expect(loadConfig({ ...validEnv, WP_SITE_URL: "https://example.com///" }).siteUrl).toBe(
+      "https://example.com"
+    );
+  });
 });
 
 describe("loadConfig - boolean toggle parsing", () => {

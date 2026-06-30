@@ -185,7 +185,7 @@ async function makeWPRequest<T>({
   const fullUrl = `${config.siteUrl}/wp-json/wp/v2/${endpoint}`;
 
   // Enforce HTTPS + SSRF/allowlist policy before any network activity.
-  validateTarget(fullUrl, config);
+  await validateTarget(fullUrl, config);
 
   const authString = Buffer.from(`${config.username}:${config.password}`).toString('base64');
 

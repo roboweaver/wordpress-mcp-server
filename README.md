@@ -4,6 +4,8 @@
 
 A Model Context Protocol (MCP) server that lets AI assistants interact with a WordPress site through the WordPress REST API. It provides tools for managing users, posts, comments, and categories, plus a set of Jetpack/WP.com site-stats tools.
 
+> **Breaking change:** Tools no longer accept `siteUrl`, `username`, or `password` parameters. Credentials and the site URL are now supplied to the server via environment variables (see [Server configuration](#server-configuration-environment-variables)). Update your MCP client configuration accordingly.
+
 <a href="https://glama.ai/mcp/servers/@prathammanocha/wordpress-mcp-server">
   <img width="380" height="200" src="https://glama.ai/mcp/servers/@prathammanocha/wordpress-mcp-server/badge" alt="WordPress Server MCP server" />
 </a>
@@ -21,7 +23,7 @@ Credentials and the target site URL are **not** part of the tool surface. They a
 
 ## Prerequisites
 
-- Node.js v18 or higher
+- Node.js v20 or higher (the build runs on v18+, but the test toolchain requires v20+)
 - A WordPress site with the REST API enabled (default in WordPress 4.7+)
 - A WordPress **Application Password** for a dedicated, least-privilege service user
 
@@ -36,6 +38,7 @@ Credentials and the target site URL are **not** part of the tool surface. They a
    ```bash
    npm install
    ```
+   In CI, prefer `npm ci` for a reproducible install from the lockfile.
 3. Build the server:
    ```bash
    npm run build

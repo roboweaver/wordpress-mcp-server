@@ -4,6 +4,9 @@
   "description": "WordPress MCP Server with comprehensive API support",
   "type": "module",
   "main": "build/index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node build/index.js",
@@ -13,6 +16,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "axios": "^1.18.1",
+    "ipaddr.js": "^2.4.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

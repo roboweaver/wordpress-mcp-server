@@ -149,5 +149,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     );
   }
 
+  // Normalize the site URL so endpoint concatenation never yields double slashes.
+  result.data.siteUrl = result.data.siteUrl.replace(/\/+$/, "");
+
   return result.data;
 }
