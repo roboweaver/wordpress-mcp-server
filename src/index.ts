@@ -3,6 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import axios from "axios";
+import { loadConfig, type WPConfig } from "./config.js";
+import { validateTarget } from "./security.js";
 
 // ================ INTERFACES ================
 
@@ -148,34 +150,49 @@ interface WPPostStatsData {
 const server = new McpServer({
   name: "wordpress",
   version: "1.0.0",
+}, {
   capabilities: {
     resources: {},
     tools: {},
   },
 });
 
-// Helper function for making WordPress API requests
+// Module-level configuration singleton. Populated by main() at startup via
+// loadConfig(); credentials and the target site URL come from here, never from
+// model-visible tool parameters.
+let config: WPConfig;
+
+// Dedicated axios instance for WordPress REST calls. maxRedirects: 0 prevents the
+// client from silently following cross-host redirects that could leak the
+// Authorization header to an unintended host. Basic auth is attached per request
+// (below), NOT as a global default, so credentials are only sent to validated targets.
+const wpClient = axios.create({ maxRedirects: 0 });
+
+// Helper function for making WordPress API requests.
+// Reads siteUrl and credentials from the loaded config; validates the target URL
+// against the SSRF/HTTPS policy before issuing the request.
 async function makeWPRequest<T>({
-  siteUrl, 
   endpoint,
   method = 'GET',
-  auth,
   data = null,
   params = null
 }: {
-  siteUrl: string;
   endpoint: string;
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
-  auth: { username: string; password: string };
   data?: any;
   params?: any;
 }): Promise<T> {
-  const authString = Buffer.from(`${auth.username}:${auth.password}`).toString('base64');
-  
+  const fullUrl = `${config.siteUrl}/wp-json/wp/v2/${endpoint}`;
+
+  // Enforce HTTPS + SSRF/allowlist policy before any network activity.
+  validateTarget(fullUrl, config);
+
+  const authString = Buffer.from(`${config.username}:${config.password}`).toString('base64');
+
   try {
-    const response = await axios({
+    const response = await wpClient({
       method,
-      url: `${siteUrl}/wp-json/wp/v2/${endpoint}`,
+      url: fullUrl,
       headers: {
         'Authorization': `Basic ${authString}`,
         'Content-Type': 'application/json',
@@ -186,10 +203,44 @@ async function makeWPRequest<T>({
     
     return response.data as T;
   } catch (error) {
-    if (axios.isAxiosError(error) && error.response) {
-      throw new Error(`WordPress API error: ${error.response.data?.message || error.message}`);
+    // Sanitized error reporting (Req 7.1, 7.2): surface a useful summary
+    // (HTTP status + a short upstream message) without ever leaking the
+    // request URL with its query params, request headers, the Basic auth
+    // string, or the full axios error object (which serializes all of those).
+    const MAX_UPSTREAM_MESSAGE_LENGTH = 200;
+
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+
+      // Use ONLY the WordPress upstream `message` field. Never fall back to
+      // error.message, which for a failed request can embed the full URL.
+      const rawMessage = error.response?.data?.message;
+      const upstreamMessage =
+        typeof rawMessage === 'string' && rawMessage.trim().length > 0
+          ? rawMessage.trim().slice(0, MAX_UPSTREAM_MESSAGE_LENGTH)
+          : undefined;
+
+      if (status !== undefined) {
+        throw new Error(
+          upstreamMessage
+            ? `WordPress API error (status ${status}): ${upstreamMessage}`
+            : `WordPress API error (status ${status})`
+        );
+      }
+
+      // No response received: a network/transport-level failure. Report a
+      // generic message and deliberately omit error.message, error.config.url,
+      // and any request details that could expose the target URL or params.
+      throw new Error('WordPress API request failed: no response received from the WordPress site.');
     }
-    throw error;
+
+    // Non-axios errors are unexpected here (target validation runs before the
+    // request, outside this try). Re-throw with just the message, truncated, so
+    // no large or structured payload is propagated.
+    if (error instanceof Error) {
+      throw new Error(error.message.slice(0, MAX_UPSTREAM_MESSAGE_LENGTH));
+    }
+    throw new Error('WordPress API request failed.');
   }
 }
 
@@ -200,9 +251,6 @@ server.tool(
   "get-users",
   "Get a list of users from a WordPress site with advanced filtering options",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     context: z.enum(["view", "embed", "edit"]).optional().default("view").describe("Scope under which the request is made"),
     page: z.number().min(1).optional().default(1).describe("Current page of the collection"),
     perPage: z.number().min(1).max(100).optional().default(10).describe("Maximum number of items to be returned"),
@@ -218,10 +266,7 @@ server.tool(
     who: z.enum(["authors"]).optional().describe("Limit result set to users who are considered authors"),
     hasPublishedPosts: z.boolean().optional().describe("Limit result set to users who have published posts"),
   },
-  async ({ 
-    siteUrl, 
-    username, 
-    password, 
+  async ({
     context,
     page,
     perPage,
@@ -257,9 +302,7 @@ server.tool(
       if (hasPublishedPosts !== undefined) params.has_published_posts = hasPublishedPosts;
 
       const users = await makeWPRequest<WPUser[]>({
-        siteUrl,
         endpoint: "users",
-        auth: { username, password },
         params
       });
       
@@ -280,7 +323,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Users from ${siteUrl}:\n\n${usersText}`,
+            text: `Users from ${config.siteUrl}:\n\n${usersText}`,
           },
         ],
       };
@@ -302,18 +345,13 @@ server.tool(
   "get-user",
   "Get a specific user by ID",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     userId: z.union([z.string(), z.number(), z.literal("me")]).describe("User ID or 'me' for current user"),
     context: z.enum(["view", "embed", "edit"]).optional().default("view").describe("Scope under which the request is made"),
   },
-  async ({ siteUrl, username, password, userId, context }) => {
+  async ({ userId, context }) => {
     try {
       const user = await makeWPRequest<WPUser>({
-        siteUrl,
         endpoint: `users/${userId}`,
-        auth: { username, password },
         params: { context }
       });
       
@@ -343,9 +381,6 @@ server.tool(
   "create-user",
   "Create a new WordPress user",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     newUsername: z.string().describe("Login name for the new user"),
     email: z.string().email().describe("Email address for the new user"),
     newPassword: z.string().describe("Password for the new user"),
@@ -360,9 +395,6 @@ server.tool(
     roles: z.array(z.string()).optional().describe("Roles assigned to the user"),
   },
   async ({ 
-    siteUrl, 
-    username, 
-    password,
     newUsername,
     email,
     newPassword,
@@ -394,10 +426,8 @@ server.tool(
       if (roles) userData.roles = roles;
 
       const user = await makeWPRequest<WPUser>({
-        siteUrl,
         endpoint: "users",
         method: "POST",
-        auth: { username, password },
         data: userData
       });
       
@@ -427,9 +457,6 @@ server.tool(
   "update-user",
   "Update an existing WordPress user",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     userId: z.union([z.string(), z.number(), z.literal("me")]).describe("User ID or 'me' for current user"),
     newUsername: z.string().optional().describe("New login name for the user"),
     email: z.string().email().optional().describe("New email address for the user"),
@@ -445,9 +472,6 @@ server.tool(
     roles: z.array(z.string()).optional().describe("New roles assigned to the user"),
   },
   async ({ 
-    siteUrl, 
-    username, 
-    password,
     userId,
     newUsername,
     email,
@@ -490,10 +514,8 @@ server.tool(
       }
 
       const user = await makeWPRequest<WPUser>({
-        siteUrl,
         endpoint: `users/${userId}`,
         method: "POST",
-        auth: { username, password },
         data: userData
       });
       
@@ -523,19 +545,24 @@ server.tool(
   "delete-user",
   "Delete a WordPress user",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     userId: z.union([z.string(), z.number(), z.literal("me")]).describe("User ID or 'me' for current user"),
     reassignId: z.number().describe("ID of the user to reassign posts to"),
   },
-  async ({ siteUrl, username, password, userId, reassignId }) => {
+  async ({ userId, reassignId }) => {
+    if (!config.allowDestructive) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Destructive operations are disabled. Deleting a user is blocked. To enable destructive operations, set WP_ALLOW_DESTRUCTIVE=true in the server environment.",
+          },
+        ],
+      };
+    }
     try {
       await makeWPRequest<any>({
-        siteUrl,
         endpoint: `users/${userId}`,
         method: "DELETE",
-        auth: { username, password },
         params: {
           force: true,
           reassign: reassignId
@@ -570,9 +597,6 @@ server.tool(
   "list-posts",
   "Get a list of posts with comprehensive filtering options",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     context: z.enum(["view", "embed", "edit"]).optional().default("view").describe("Scope under which the request is made"),
     page: z.number().min(1).optional().default(1).describe("Current page of the collection"),
     perPage: z.number().min(1).max(100).optional().default(10).describe("Maximum number of items to be returned"),
@@ -599,9 +623,6 @@ server.tool(
     sticky: z.boolean().optional().describe("Limit result set to items that are sticky"),
   },
   async ({ 
-    siteUrl, 
-    username, 
-    password,
     context,
     page,
     perPage,
@@ -657,9 +678,7 @@ server.tool(
       if (sticky !== undefined) params.sticky = sticky;
 
       const posts = await makeWPRequest<WPPost[]>({
-        siteUrl,
         endpoint: "posts",
-        auth: { username, password },
         params
       });
       
@@ -682,7 +701,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Posts from ${siteUrl}:\n\n${postsText}`,
+            text: `Posts from ${config.siteUrl}:\n\n${postsText}`,
           },
         ],
       };
@@ -704,22 +723,17 @@ server.tool(
   "get-post",
   "Get a specific post by ID",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     postId: z.number().describe("ID of the post to retrieve"),
     context: z.enum(["view", "embed", "edit"]).optional().default("view").describe("Scope under which the request is made"),
     postPassword: z.string().optional().describe("The password for the post if it is password protected"),
   },
-  async ({ siteUrl, username, password, postId, context, postPassword }) => {
+  async ({ postId, context, postPassword }) => {
     try {
       const params: Record<string, any> = { context };
       if (postPassword) params.password = postPassword;
 
       const post = await makeWPRequest<WPPost>({
-        siteUrl,
         endpoint: `posts/${postId}`,
-        auth: { username, password },
         params
       });
       
@@ -749,9 +763,6 @@ server.tool(
   "create-post",
   "Create a new WordPress post",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     title: z.string().describe("The title for the post"),
     content: z.string().describe("The content for the post"),
     status: z.enum(["publish", "future", "draft", "pending", "private"]).optional().default("draft").describe("A named status for the post"),
@@ -769,12 +780,9 @@ server.tool(
     template: z.string().optional().describe("The theme file to use to display the post"),
     categories: z.array(z.number()).optional().describe("The terms assigned to the post in the category taxonomy"),
     tags: z.array(z.number()).optional().describe("The terms assigned to the post in the post_tag taxonomy"),
-    meta: z.record(z.any()).optional().describe("Meta fields"),
+    meta: z.record(z.string(), z.any()).optional().describe("Meta fields"),
   },
   async ({ 
-    siteUrl, 
-    username, 
-    password,
     title,
     content,
     status,
@@ -818,10 +826,8 @@ server.tool(
       if (meta) postData.meta = meta;
 
       const post = await makeWPRequest<WPPost>({
-        siteUrl,
         endpoint: "posts",
         method: "POST",
-        auth: { username, password },
         data: postData
       });
       
@@ -851,9 +857,6 @@ server.tool(
   "update-post",
   "Update an existing WordPress post",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     postId: z.number().describe("ID of the post to update"),
     title: z.string().optional().describe("New title for the post"),
     content: z.string().optional().describe("New content for the post"),
@@ -872,12 +875,9 @@ server.tool(
     template: z.string().optional().describe("New template for the post"),
     categories: z.array(z.number()).optional().describe("New categories for the post"),
     tags: z.array(z.number()).optional().describe("New tags for the post"),
-    meta: z.record(z.any()).optional().describe("New meta fields"),
+    meta: z.record(z.string(), z.any()).optional().describe("New meta fields"),
   },
   async ({ 
-    siteUrl, 
-    username, 
-    password,
     postId,
     title,
     content,
@@ -932,10 +932,8 @@ server.tool(
       }
 
       const post = await makeWPRequest<WPPost>({
-        siteUrl,
         endpoint: `posts/${postId}`,
         method: "POST",
-        auth: { username, password },
         data: postData
       });
       
@@ -965,19 +963,24 @@ server.tool(
   "delete-post",
   "Delete a WordPress post",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     postId: z.number().describe("ID of the post to delete"),
     force: z.boolean().optional().default(false).describe("Whether to bypass Trash and force deletion"),
   },
-  async ({ siteUrl, username, password, postId, force }) => {
+  async ({ postId, force }) => {
+    if (force && !config.allowDestructive) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Destructive operations are disabled. Force-deleting a post permanently bypasses the Trash and is blocked. To enable destructive operations, set WP_ALLOW_DESTRUCTIVE=true in the server environment. You can still move the post to Trash by calling delete-post without force.",
+          },
+        ],
+      };
+    }
     try {
       await makeWPRequest<any>({
-        siteUrl,
         endpoint: `posts/${postId}`,
         method: "DELETE",
-        auth: { username, password },
         params: { force }
       });
       
@@ -1008,22 +1011,17 @@ server.tool(
   "get-comments",
   "Get a list of comments from a WordPress site",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     postId: z.number().optional().describe("Filter comments by post ID"),
     perPage: z.number().min(1).max(100).optional().describe("Number of comments per page"),
     page: z.number().min(1).optional().describe("Page number"),
   },
-  async ({ siteUrl, username, password, postId, perPage = 10, page = 1 }) => {
+  async ({ postId, perPage = 10, page = 1 }) => {
     try {
       const params: Record<string, any> = { per_page: perPage, page };
       if (postId !== undefined) params.post = postId;
       
       const comments = await makeWPRequest<WPComment[]>({
-        siteUrl,
         endpoint: "comments",
-        auth: { username, password },
         params
       });
       
@@ -1045,7 +1043,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Comments from ${siteUrl}${postId ? ` for post #${postId}` : ''}:\n\n${commentsText}`,
+            text: `Comments from ${config.siteUrl}${postId ? ` for post #${postId}` : ''}:\n\n${commentsText}`,
           },
         ],
       };
@@ -1066,15 +1064,12 @@ server.tool(
   "create-comment",
   "Create a new comment on a WordPress post",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     postId: z.number().describe("ID of the post to comment on"),
     content: z.string().describe("Comment content"),
     author_name: z.string().optional().describe("Comment author name (for users who can't set this)"),
     author_email: z.string().email().optional().describe("Comment author email (for users who can't set this)"),
   },
-  async ({ siteUrl, username, password, postId, content, author_name, author_email }) => {
+  async ({ postId, content, author_name, author_email }) => {
     try {
       const commentData: Record<string, any> = {
         post: postId,
@@ -1085,10 +1080,8 @@ server.tool(
       if (author_email) commentData.author_email = author_email;
       
       const comment = await makeWPRequest<WPComment>({
-        siteUrl,
         endpoint: "comments",
         method: "POST",
-        auth: { username, password },
         data: commentData
       });
       
@@ -1119,17 +1112,12 @@ server.tool(
   "get-stats-highlights",
   "Get highlight metrics for a WordPress site from the last seven days",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
   },
-  async ({ siteUrl, username, password, siteId }) => {
+  async ({ siteId }) => {
     try {
       const highlights = await makeWPRequest<WPStatsHighlights>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/highlights`,
-        auth: { username, password }
       });
       
       const highlightsText = `
@@ -1169,17 +1157,12 @@ server.tool(
   "get-stats-summary",
   "View a site's summarized views, visitors, likes and comments",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
   },
-  async ({ siteUrl, username, password, siteId }) => {
+  async ({ siteId }) => {
     try {
       const summary = await makeWPRequest<WPStatsSummary>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/summary`,
-        auth: { username, password }
       });
       
       const summaryText = `
@@ -1228,19 +1211,14 @@ server.tool(
   "get-top-posts",
   "View a site's top posts and pages by views",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
     period: z.enum(["day", "week", "month", "year"]).optional().describe("Time period for stats"),
     limit: z.number().min(1).max(100).optional().describe("Maximum number of posts to return"),
   },
-  async ({ siteUrl, username, password, siteId, period = "week", limit = 10 }) => {
+  async ({ siteId, period = "week", limit = 10 }) => {
     try {
       const topPosts = await makeWPRequest<{posts: WPTopPost[]}>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/top-posts`,
-        auth: { username, password },
         params: { period, limit }
       });
       
@@ -1281,19 +1259,14 @@ server.tool(
   "get-referrers",
   "View a site's referrers",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
     period: z.enum(["day", "week", "month", "year"]).optional().describe("Time period for stats"),
     limit: z.number().min(1).max(100).optional().describe("Maximum number of referrers to return"),
   },
-  async ({ siteUrl, username, password, siteId, period = "week", limit = 10 }) => {
+  async ({ siteId, period = "week", limit = 10 }) => {
     try {
       const referrersData = await makeWPRequest<{referrers: WPReferrer[]}>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/referrers`,
-        auth: { username, password },
         params: { period, limit }
       });
       
@@ -1333,19 +1306,14 @@ server.tool(
   "get-country-views",
   "View a site's views by country",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
     period: z.enum(["day", "week", "month", "year"]).optional().describe("Time period for stats"),
     limit: z.number().min(1).max(100).optional().describe("Maximum number of countries to return"),
   },
-  async ({ siteUrl, username, password, siteId, period = "week", limit = 10 }) => {
+  async ({ siteId, period = "week", limit = 10 }) => {
     try {
       const countryData = await makeWPRequest<{country_views: WPCountryView[]}>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/country-views`,
-        auth: { username, password },
         params: { period, limit }
       });
       
@@ -1384,18 +1352,13 @@ server.tool(
   "get-post-stats",
   "View a specific post's views",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
     postId: z.number().describe("Post ID to get stats for"),
   },
-  async ({ siteUrl, username, password, siteId, postId }) => {
+  async ({ siteId, postId }) => {
     try {
       const postStats = await makeWPRequest<any>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/post/${postId}`,
-        auth: { username, password }
       });
       
       // Format will depend on the actual API response
@@ -1444,18 +1407,13 @@ server.tool(
   "get-site-stats",
   "Get comprehensive stats for a WordPress site",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
     period: z.enum(["day", "week", "month", "year"]).optional().describe("Time period for stats"),
   },
-  async ({ siteUrl, username, password, siteId, period = "week" }) => {
+  async ({ siteId, period = "week" }) => {
     try {
       const stats = await makeWPRequest<any>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats`,
-        auth: { username, password },
         params: { period }
       });
       
@@ -1518,19 +1476,14 @@ server.tool(
   "report-referrer-spam",
   "Report a referrer as spam",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
     domain: z.string().describe("Domain to report as spam"),
   },
-  async ({ siteUrl, username, password, siteId, domain }) => {
+  async ({ siteId, domain }) => {
     try {
       const response = await makeWPRequest<any>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/referrers/spam/new`,
         method: "POST",
-        auth: { username, password },
         data: { domain }
       });
       
@@ -1560,19 +1513,14 @@ server.tool(
   "remove-referrer-spam",
   "Unreport a referrer as spam",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
     domain: z.string().describe("Domain to remove from spam list"),
   },
-  async ({ siteUrl, username, password, siteId, domain }) => {
+  async ({ siteId, domain }) => {
     try {
       const response = await makeWPRequest<any>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/referrers/spam/delete`,
         method: "POST",
-        auth: { username, password },
         data: { domain }
       });
       
@@ -1602,19 +1550,14 @@ server.tool(
   "get-clicks",
   "View a site's outbound clicks",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
     period: z.enum(["day", "week", "month", "year"]).optional().describe("Time period for stats"),
     limit: z.number().min(1).max(100).optional().describe("Maximum number of click items to return"),
   },
-  async ({ siteUrl, username, password, siteId, period = "week", limit = 10 }) => {
+  async ({ siteId, period = "week", limit = 10 }) => {
     try {
       const clicksData = await makeWPRequest<any>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/clicks`,
-        auth: { username, password },
         params: { period, limit }
       });
       
@@ -1654,19 +1597,14 @@ server.tool(
   "get-search-terms",
   "View search terms used to find the site",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
     period: z.enum(["day", "week", "month", "year"]).optional().describe("Time period for stats"),
     limit: z.number().min(1).max(100).optional().describe("Maximum number of search terms to return"),
   },
-  async ({ siteUrl, username, password, siteId, period = "week", limit = 10 }) => {
+  async ({ siteId, period = "week", limit = 10 }) => {
     try {
       const searchData = await makeWPRequest<any>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/search-terms`,
-        auth: { username, password },
         params: { period, limit }
       });
       
@@ -1704,17 +1642,12 @@ server.tool(
   "get-streak-stats",
   "Get stats for Calendar Heatmap showing publishing activity",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     siteId: z.number().describe("WordPress site ID"),
   },
-  async ({ siteUrl, username, password, siteId }) => {
+  async ({ siteId }) => {
     try {
       const streakData = await makeWPRequest<any>({
-        siteUrl,
         endpoint: `sites/${siteId}/stats/streak`,
-        auth: { username, password }
       });
       
       let streakText = `Publishing Activity for site #${siteId}:\n\n`;
@@ -1786,9 +1719,6 @@ server.tool(
   "list-categories",
   "Get a list of categories with filtering options",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     context: z.enum(["view", "embed", "edit"]).optional().default("view").describe("Scope under which the request is made"),
     page: z.number().min(1).optional().default(1).describe("Current page of the collection"),
     perPage: z.number().min(1).max(100).optional().default(10).describe("Maximum number of items to be returned"),
@@ -1803,9 +1733,6 @@ server.tool(
     slug: z.array(z.string()).optional().describe("Limit result set to terms with one or more specific slugs"),
   },
   async ({ 
-    siteUrl, 
-    username, 
-    password,
     context,
     page,
     perPage,
@@ -1837,9 +1764,7 @@ server.tool(
       if (slug) params.slug = slug.join(',');
 
       const categories = await makeWPRequest<WPCategory[]>({
-        siteUrl,
         endpoint: "categories",
-        auth: { username, password },
         params
       });
       
@@ -1862,7 +1787,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Categories from ${siteUrl}:\n\n${categoriesText}`,
+            text: `Categories from ${config.siteUrl}:\n\n${categoriesText}`,
           },
         ],
       };
@@ -1884,18 +1809,13 @@ server.tool(
   "get-category",
   "Get a specific category by ID",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     categoryId: z.number().describe("ID of the category to retrieve"),
     context: z.enum(["view", "embed", "edit"]).optional().default("view").describe("Scope under which the request is made"),
   },
-  async ({ siteUrl, username, password, categoryId, context }) => {
+  async ({ categoryId, context }) => {
     try {
       const category = await makeWPRequest<WPCategory>({
-        siteUrl,
         endpoint: `categories/${categoryId}`,
-        auth: { username, password },
         params: { context }
       });
       
@@ -1925,19 +1845,13 @@ server.tool(
   "create-category",
   "Create a new WordPress category",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     name: z.string().describe("HTML title for the term"),
     description: z.string().optional().describe("HTML description of the term"),
     slug: z.string().optional().describe("An alphanumeric identifier for the term unique to its type"),
     parent: z.number().optional().describe("The parent term ID"),
-    meta: z.record(z.any()).optional().describe("Meta fields"),
+    meta: z.record(z.string(), z.any()).optional().describe("Meta fields"),
   },
   async ({ 
-    siteUrl, 
-    username, 
-    password,
     name,
     description,
     slug,
@@ -1953,10 +1867,8 @@ server.tool(
       if (meta) categoryData.meta = meta;
 
       const category = await makeWPRequest<WPCategory>({
-        siteUrl,
         endpoint: "categories",
         method: "POST",
-        auth: { username, password },
         data: categoryData
       });
       
@@ -1986,20 +1898,14 @@ server.tool(
   "update-category",
   "Update an existing WordPress category",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     categoryId: z.number().describe("ID of the category to update"),
     name: z.string().optional().describe("New HTML title for the term"),
     description: z.string().optional().describe("New HTML description of the term"),
     slug: z.string().optional().describe("New alphanumeric identifier for the term"),
     parent: z.number().optional().describe("New parent term ID"),
-    meta: z.record(z.any()).optional().describe("New meta fields"),
+    meta: z.record(z.string(), z.any()).optional().describe("New meta fields"),
   },
   async ({ 
-    siteUrl, 
-    username, 
-    password,
     categoryId,
     name,
     description,
@@ -2028,10 +1934,8 @@ server.tool(
       }
 
       const category = await makeWPRequest<WPCategory>({
-        siteUrl,
         endpoint: `categories/${categoryId}`,
         method: "POST",
-        auth: { username, password },
         data: categoryData
       });
       
@@ -2061,19 +1965,24 @@ server.tool(
   "delete-category",
   "Delete a WordPress category",
   {
-    siteUrl: z.string().url().describe("WordPress site URL"),
-    username: z.string().describe("WordPress username"),
-    password: z.string().describe("WordPress application password"),
     categoryId: z.number().describe("ID of the category to delete"),
     force: z.boolean().optional().default(true).describe("Required to be true, as terms do not support trashing"),
   },
-  async ({ siteUrl, username, password, categoryId, force }) => {
+  async ({ categoryId, force }) => {
+    if (!config.allowDestructive) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Destructive operations are disabled. Deleting a category is blocked. To enable destructive operations, set WP_ALLOW_DESTRUCTIVE=true in the server environment.",
+          },
+        ],
+      };
+    }
     try {
       await makeWPRequest<any>({
-        siteUrl,
         endpoint: `categories/${categoryId}`,
         method: "DELETE",
-        auth: { username, password },
         params: { force }
       });
       
@@ -2101,6 +2010,13 @@ server.tool(
 // ================ MAIN FUNCTION ================
 
 async function main() {
+  try {
+    config = loadConfig();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("WordPress MCP Server running on stdio");

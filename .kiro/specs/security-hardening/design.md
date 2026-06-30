@@ -169,6 +169,35 @@ Note: exact target versions are determined at implementation time by checking th
 published versions, since the advisory set evolves. The acceptance test is the audit
 result, not a hardcoded version number.
 
+#### Implementation outcome (zod major alignment)
+
+During implementation, `npm run build` (tsc) crashed with a JavaScript heap out-of-memory
+abort (`FATAL ERROR: Ineffective mark-compacts near heap limit`, exit 134) and no error
+list. A `tsc --generateTrace` + `@typescript/analyze-trace` run identified the cause: a
+**duplicate `zod` install**. The project pinned `zod@3.24.3`, but `@modelcontextprotocol/sdk`
+declares `zod@^3.25 || ^4.0`; since `3.24.3` is just below `^3.25`, npm could not dedupe and
+installed a second nested copy (`zod@4.4.3`) under the SDK. TypeScript then structurally
+compared the project's zod-v3 schema types against the SDK's zod-v4 types across all ~29
+`server.tool()` registrations, recursing through zod's deep generic types until it exhausted
+the heap. The empty build output that earlier looked like a "hang" was this runaway
+type-checking, not silent success (tsc is silent on success and exits 0).
+
+Decision: align the entire tree on a single zod major. We chose **zod 4** (the latest, 4.4.3)
+over pinning the 3.25.x line, because the SDK already uses zod 4 internally and zod 4 was
+rewritten to reduce TypeScript checker load, lowering the chance of recurrence. The required
+v4 migration was small and contained:
+- `src/config.ts`: replace the removed `required_error` option with zod 4's unified `error`
+  API (fail-fast messages that name each missing key were re-verified — Req 1.3).
+- `src/index.ts`: `z.record(z.any())` -> `z.record(z.string(), z.any())` (v4 requires an
+  explicit key schema) at the four `meta` fields.
+- `src/index.ts`: move `capabilities` to the `McpServer` constructor's second options
+  argument (an SDK-API mismatch that surfaced once the build type-checked past the OOM).
+
+`axios@1.18.1` and `@modelcontextprotocol/sdk@1.29.0` were left in place because `npm audit`
+already reports zero vulnerabilities with them; per the note above, the audit result is the
+acceptance test. After alignment: single `zod@4.4.3`, `npm run build` exits 0, `npm audit`
+reports 0 vulnerabilities.
+
 ### 6. Destructive operation gating
 
 For `delete-user`, `delete-post` (force path), and `delete-category`:
