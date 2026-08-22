@@ -1,0 +1,140 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1. Add configuration module with fail-fast validation": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700143
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850711338
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850920499
+      }
+    ],
+    "2. Implement target validation / SSRF guard": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700176
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850923678
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851103425
+      }
+    ],
+    "3. Refactor `makeWPRequest` to use config and the SSRF guard": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700198
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851108265
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851295882
+      }
+    ],
+    "4. Remove credentials and siteUrl from all tool schemas": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700224
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851299133
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851652188
+      }
+    ],
+    "5. Gate destructive tools behind `allowDestructive`": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700243
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851658454
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851770042
+      }
+    ],
+    "6. Harden error reporting": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700264
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851773530
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851875715
+      }
+    ],
+    "7. Update dependencies and verify audit is clean": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700283
+      },
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782851891482
+      }
+    ],
+    "8. Add focused tests for security-critical units": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700302
+      }
+    ],
+    "9. Align README with the implementation": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700321
+      }
+    ],
+    "10. Final verification pass": [
+      {
+        "executionId": "bcf9add2-7949-470f-b9cd-3ec27e7e23d2",
+        "chatSessionId": "sess_64f3032d-9865-4d45-b1af-6bb30c408414",
+        "timestamp": 1782850700345
+      }
+    ]
+  }
+}
